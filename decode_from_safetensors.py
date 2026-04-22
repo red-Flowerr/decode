@@ -54,11 +54,21 @@ def check_dataset_shards(repo_dir: Path, dataset_entry: dict):
 
 
 def decode_dataset(repo_dir: Path, dataset_entry: dict, output_dir: Path,
-                   decompressor, skip_missing: bool = False):
-    """Decode one dataset from safetensors shard(s) back to parquet files."""
+                   decompressor, skip_missing: bool = False,
+                   path_separator: str = None):
+    """Decode one dataset from safetensors shard(s) back to original files.
+
+    Supports two manifest types:
+      - Flat parquet datasets: tensor keys are plain filenames, output to <name>/data/
+      - Directory trees: tensor keys use path_separator (e.g. '||') for nested paths
+    """
     yaml_name = dataset_entry["yaml_name"]
     shard_files = dataset_entry["shard_files"]
-    dataset_dir = output_dir / yaml_name / "data"
+
+    if path_separator:
+        dataset_dir = output_dir / yaml_name
+    else:
+        dataset_dir = output_dir / yaml_name / "data"
     dataset_dir.mkdir(parents=True, exist_ok=True)
 
     file_count = 0
@@ -78,10 +88,17 @@ def decode_dataset(repo_dir: Path, dataset_entry: dict, output_dir: Path,
                 return 0, 0, missing_shards
 
         tensors = load_file(str(shard_path))
-        for filename, tensor in tensors.items():
+        for tensor_key, tensor in tensors.items():
             compressed_bytes = tensor.tobytes()
             raw_bytes = decompressor.decompress(compressed_bytes)
-            out_file = dataset_dir / filename
+
+            if path_separator:
+                rel_path = tensor_key.replace(path_separator, os.sep)
+            else:
+                rel_path = tensor_key
+
+            out_file = dataset_dir / rel_path
+            out_file.parent.mkdir(parents=True, exist_ok=True)
             out_file.write_bytes(raw_bytes)
             file_count += 1
             total_bytes += len(raw_bytes)
@@ -140,6 +157,11 @@ def main():
 
     output_dir.mkdir(parents=True, exist_ok=True)
     decompressor = zstd.ZstdDecompressor()
+    path_separator = manifest.get("path_separator")
+    manifest_type = manifest.get("type", "flat")
+    if path_separator:
+        print(f"  Manifest type: directory_tree (separator: '{path_separator}')")
+
     total_files = 0
     total_size = 0
     all_missing = []
@@ -152,7 +174,8 @@ def main():
             continue
         print(f"[{i}/{len(datasets)}] {name} ({present}/{total} shards)")
         fc, tb, missing = decode_dataset(
-            repo_dir, entry, output_dir, decompressor, skip_missing=args.skip_missing
+            repo_dir, entry, output_dir, decompressor,
+            skip_missing=args.skip_missing, path_separator=path_separator
         )
         total_files += fc
         total_size += tb
